@@ -289,9 +289,7 @@ function Get-WindowLabel {
     if ($DurationMinutes -eq 1440) { return 'daily limit' }
     if ($DurationMinutes -gt 0 -and ($DurationMinutes % 60) -eq 0) {
         $hours = [int]($DurationMinutes / 60)
-        $unit = 'hours'
-        if ($hours -eq 1) { $unit = 'hour' }
-        return "$hours $unit limit"
+        return "$hours hour limit"
     }
     if ($DurationMinutes -gt 0) { return "$DurationMinutes minute limit" }
     return 'usage limit'
@@ -611,6 +609,76 @@ function Show-Help {
     [void](Read-Host 'Press Enter to return')
 }
 
+function Read-MenuInput {
+    param([Parameter(Mandatory = $true)][string]$Placeholder)
+
+    Write-Host '>: ' -NoNewline
+    $origin = $Host.UI.RawUI.CursorPosition
+    Write-Host $Placeholder -NoNewline -ForegroundColor DarkGray
+    [Console]::SetCursorPosition($origin.X, $origin.Y)
+
+    $characters = New-Object 'System.Collections.Generic.List[char]'
+    $cursor = 0
+    $renderedLength = 0
+    $placeholderVisible = $true
+
+    while ($true) {
+        $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+
+        if ($placeholderVisible) {
+            [Console]::SetCursorPosition($origin.X, $origin.Y)
+            [Console]::Write((' ' * $Placeholder.Length))
+            [Console]::SetCursorPosition($origin.X, $origin.Y)
+            $placeholderVisible = $false
+        }
+
+        if ($key.Key -eq 'Enter') {
+            [Console]::SetCursorPosition($origin.X + $cursor, $origin.Y)
+            [Console]::WriteLine()
+            return -join $characters.ToArray()
+        }
+        if ($key.Key -eq 'Escape') {
+            [Console]::SetCursorPosition($origin.X, $origin.Y)
+            [Console]::Write((' ' * $renderedLength))
+            [Console]::SetCursorPosition($origin.X, $origin.Y)
+            [Console]::WriteLine()
+            return ''
+        }
+        if ($key.Key -eq 'Backspace' -and $cursor -gt 0) {
+            $characters.RemoveAt($cursor - 1)
+            $cursor = $cursor - 1
+        }
+        elseif ($key.Key -eq 'Delete' -and $cursor -lt $characters.Count) {
+            $characters.RemoveAt($cursor)
+        }
+        elseif ($key.Key -eq 'LeftArrow' -and $cursor -gt 0) {
+            $cursor = $cursor - 1
+        }
+        elseif ($key.Key -eq 'RightArrow' -and $cursor -lt $characters.Count) {
+            $cursor = $cursor + 1
+        }
+        elseif ($key.Key -eq 'Home') {
+            $cursor = 0
+        }
+        elseif ($key.Key -eq 'End') {
+            $cursor = $characters.Count
+        }
+        elseif (-not [char]::IsControl($key.Character)) {
+            $characters.Insert($cursor, $key.Character)
+            $cursor = $cursor + 1
+        }
+
+        $line = -join $characters.ToArray()
+        [Console]::SetCursorPosition($origin.X, $origin.Y)
+        [Console]::Write($line)
+        if ($renderedLength -gt $line.Length) {
+            [Console]::Write((' ' * ($renderedLength - $line.Length)))
+        }
+        $renderedLength = $line.Length
+        [Console]::SetCursorPosition($origin.X + $cursor, $origin.Y)
+    }
+}
+
 function Rename-Account {
     param(
         [Parameter(Mandatory = $true)]$State,
@@ -656,9 +724,9 @@ function Show-MainMenu {
         }
 
         Clear-Host
-        Write-Host '+--------------------------------------------------------------------------+' -ForegroundColor DarkCyan
+        Write-Host '+--------------------------------------------------------------------------+' -ForegroundColor White
         Write-Host '| Codex Account Switcher                                                   |' -ForegroundColor Cyan
-        Write-Host '+--------------------------------------------------------------------------+' -ForegroundColor DarkCyan
+        Write-Host '+--------------------------------------------------------------------------+' -ForegroundColor White
 
         if ($snapshots.Count -eq 0) {
             Write-Host 'No accounts yet. Use /add-account to sign in.' -ForegroundColor DarkYellow
@@ -673,11 +741,8 @@ function Show-MainMenu {
             }
         }
 
-        Write-Host '+--------------------------------------------------------------------------+' -ForegroundColor DarkCyan
-        Write-Host 'Enter an account number to switch. Type a message to start Codex.' -ForegroundColor DarkGray
-        Write-Host 'Commands: /help  /switch <number>  /open  /add-account  /refresh-usage'
-        Write-Host '          /accounts  /rename-account <number> <label>  /quit'
-        $choice = (Read-Host '>').Trim()
+        Write-Host '+--------------------------------------------------------------------------+' -ForegroundColor White
+        $choice = (Read-MenuInput -Placeholder 'number to switch, message to start Codex, /help for commands').Trim()
 
         if ([string]::IsNullOrWhiteSpace($choice)) { continue }
         if ($choice -match '(?i)^/(quit|exit)$') { return }
