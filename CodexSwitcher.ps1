@@ -559,7 +559,7 @@ function Install-CodexProxy {
     foreach ($fileName in @('CodexProxy.ps1', 'codex.cmd')) {
         $sourcePath = Join-Path $PSScriptRoot $fileName
         if (-not (Test-Path -LiteralPath $sourcePath)) {
-            throw "The launcher support file '$fileName' is missing. Keep it beside CodexAccountSwitcher.ps1."
+            throw "The launcher support file '$fileName' is missing. Keep it beside CodexSwitcher.ps1."
         }
         Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $script:ProxyRoot $fileName) -Force
     }

@@ -10,10 +10,10 @@ A portable PowerShell launcher for switching between saved Codex CLI ChatGPT acc
 
 ## Start it
 
-Double-click `Run-CodexAccountSwitcher.cmd` to open the menu in a PowerShell window, or open PowerShell in this folder and run:
+Double-click `Run-CodexSwitcher.cmd` to open the menu in a PowerShell window, or open PowerShell in this folder and run:
 
 ```powershell
-.\CodexAccountSwitcher.ps1
+.\CodexSwitcher.ps1
 ```
 
 On first run, the current default Codex profile (`%USERPROFILE%\.codex`) is added as **Personal** and selected. Use `/add-account` to create another profile; each added account gets a separate Codex home and requires a one-time browser sign-in. Enter an account number or use `/switch <number>` to switch. The launcher installs a small `codex` command shim in your Windows user profile; it reads the selected account each time you run `codex`. Restart terminal applications once after the first switch so they pick up the shim's PATH entry.
