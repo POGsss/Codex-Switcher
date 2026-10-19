@@ -497,8 +497,7 @@ function Add-Account {
     }
 
     $State.profiles = @($State.profiles) + @($profile)
-    $State.selectedProfileId = $profile.id
-    Save-State -State $State
+    Set-ActiveProfile -State $State -AccountProfile $profile -Quiet
     Write-Host "Added '$label'. Its sign-in is saved on this device." -ForegroundColor Green
     [void](Read-Host 'Press Enter to continue')
 }
@@ -515,6 +514,25 @@ function Get-SelectedProfile {
         return @($State.profiles)[0]
     }
     return $null
+}
+
+function Set-ActiveProfile {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)]$AccountProfile,
+        [switch]$Quiet
+    )
+
+    # Persist this profile for normal codex launches in future terminal sessions.
+    [Environment]::SetEnvironmentVariable('CODEX_HOME', [string]$AccountProfile.home, 'User')
+    [Environment]::SetEnvironmentVariable('CODEX_HOME', [string]$AccountProfile.home, 'Process')
+    $State.selectedProfileId = $AccountProfile.id
+    Save-State -State $State
+
+    if (-not $Quiet) {
+        Write-Host "Switched to '$($AccountProfile.label)'. New terminal sessions will use this account; reopen existing terminals." -ForegroundColor Green
+        [void](Read-Host 'Press Enter to continue')
+    }
 }
 
 function Show-Help {
@@ -595,7 +613,7 @@ function Show-MainMenu {
         }
 
         Write-Host '+--------------------------------------------------------------------------+' -ForegroundColor DarkCyan
-        Write-Host 'Type a message to start Codex with the selected account.' -ForegroundColor DarkGray
+        Write-Host 'Enter an account number to switch. Type a message to start Codex.' -ForegroundColor DarkGray
         Write-Host 'Commands: /help  /switch <number>  /open  /add-account  /refresh-usage'
         Write-Host '          /accounts  /rename-account <number> <label>  /quit'
         $choice = (Read-Host '>').Trim()
@@ -624,8 +642,18 @@ function Show-MainMenu {
                 Start-Sleep -Seconds 1
                 continue
             }
-            $state.selectedProfileId = $profiles[$selectedNumber - 1].id
-            Save-State -State $state
+            Set-ActiveProfile -State $state -AccountProfile $profiles[$selectedNumber - 1]
+            continue
+        }
+        if ($choice -match '^\d+$') {
+            $selectedNumber = [int]$choice
+            $profiles = @($state.profiles)
+            if ($selectedNumber -lt 1 -or $selectedNumber -gt $profiles.Count) {
+                Write-Warning 'That account number is not in the list.'
+                Start-Sleep -Seconds 1
+                continue
+            }
+            Set-ActiveProfile -State $state -AccountProfile $profiles[$selectedNumber - 1]
             continue
         }
         if ($choice -match '(?i)^/rename-account\s+(\d+)\s+(.+)$') {
