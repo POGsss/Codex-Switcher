@@ -5,6 +5,8 @@ $ErrorActionPreference = 'Stop'
 $script:DataRoot = Join-Path $env:LOCALAPPDATA 'CodexAccountSwitcher'
 $script:ProfilesRoot = Join-Path $script:DataRoot 'profiles'
 $script:StatePath = Join-Path $script:DataRoot 'profiles.json'
+$script:ProxyRoot = Join-Path $script:DataRoot 'bin'
+$script:RealCodexPathFile = Join-Path $script:DataRoot 'codex-path.txt'
 $script:AuthEnvironmentVariables = @(
     'CODEX_HOME',
     'CODEX_ACCESS_TOKEN',
@@ -15,7 +17,20 @@ $script:AuthEnvironmentVariables = @(
 $script:CodexApplication = Get-Command codex -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 
 function Get-CodexPath {
-    if ($null -eq $script:CodexApplication) {
+    if (Test-Path -LiteralPath $script:RealCodexPathFile) {
+        $savedPath = (Get-Content -LiteralPath $script:RealCodexPathFile -Raw).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($savedPath) -and (Test-Path -LiteralPath $savedPath)) {
+            return $savedPath
+        }
+    }
+
+    $codexApplications = @(Get-Command codex -CommandType Application -All -ErrorAction SilentlyContinue |
+        Where-Object { $_.Source -and -not $_.Source.StartsWith($script:ProxyRoot, [StringComparison]::OrdinalIgnoreCase) })
+    if ($codexApplications.Count -gt 0) {
+        $script:CodexApplication = $codexApplications[0]
+    }
+
+    if ($null -eq $script:CodexApplication -or $script:CodexApplication.Source.StartsWith($script:ProxyRoot, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Codex CLI was not found on PATH. Install Codex CLI, open a new PowerShell window, and try again.'
     }
 
@@ -516,6 +531,42 @@ function Get-SelectedProfile {
     return $null
 }
 
+function Install-CodexProxy {
+    if (-not (Test-Path -LiteralPath $script:ProxyRoot)) {
+        New-Item -ItemType Directory -Path $script:ProxyRoot -Force | Out-Null
+    }
+
+    $realCodexPath = Get-CodexPath
+    if ($realCodexPath.StartsWith($script:ProxyRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The Codex command shim cannot find the original Codex CLI executable.'
+    }
+    [System.IO.File]::WriteAllText($script:RealCodexPathFile, $realCodexPath, [System.Text.UTF8Encoding]::new($false))
+
+    foreach ($fileName in @('CodexProxy.ps1', 'codex.cmd')) {
+        $sourcePath = Join-Path $PSScriptRoot $fileName
+        if (-not (Test-Path -LiteralPath $sourcePath)) {
+            throw "The launcher support file '$fileName' is missing. Keep it beside CodexAccountSwitcher.ps1."
+        }
+        Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $script:ProxyRoot $fileName) -Force
+    }
+    Copy-Item -LiteralPath (Join-Path $script:ProxyRoot 'CodexProxy.ps1') -Destination (Join-Path $script:ProxyRoot 'codex.ps1') -Force
+
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $pathEntries = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $proxyAlreadyOnUserPath = @($pathEntries | Where-Object { [string]::Equals($_.TrimEnd('\'), $script:ProxyRoot.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+    if (-not $proxyAlreadyOnUserPath) {
+        $newUserPath = $script:ProxyRoot
+        if (-not [string]::IsNullOrWhiteSpace($userPath)) { $newUserPath += ";$userPath" }
+        [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+    }
+
+    $processPathEntries = @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $proxyAlreadyOnProcessPath = @($processPathEntries | Where-Object { [string]::Equals($_.TrimEnd('\'), $script:ProxyRoot.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+    if (-not $proxyAlreadyOnProcessPath) { $env:Path = "$($script:ProxyRoot);$env:Path" }
+
+    return (-not $proxyAlreadyOnUserPath -or -not $proxyAlreadyOnProcessPath)
+}
+
 function Set-ActiveProfile {
     param(
         [Parameter(Mandatory = $true)]$State,
@@ -523,15 +574,25 @@ function Set-ActiveProfile {
         [switch]$Quiet
     )
 
-    # Persist this profile for normal codex launches in future terminal sessions.
-    [Environment]::SetEnvironmentVariable('CODEX_HOME', [string]$AccountProfile.home, 'User')
-    [Environment]::SetEnvironmentVariable('CODEX_HOME', [string]$AccountProfile.home, 'Process')
+    # Persist the selection and install a shim so future codex invocations resolve it.
     $State.selectedProfileId = $AccountProfile.id
     Save-State -State $State
+    [Environment]::SetEnvironmentVariable('CODEX_HOME', [string]$AccountProfile.home, 'User')
+    [Environment]::SetEnvironmentVariable('CODEX_HOME', [string]$AccountProfile.home, 'Process')
+    $restartTerminal = Install-CodexProxy
 
     if (-not $Quiet) {
-        Write-Host "Switched to '$($AccountProfile.label)'. New terminal sessions will use this account; reopen existing terminals." -ForegroundColor Green
+        Write-Host "Switched to '$($AccountProfile.label)'." -ForegroundColor Green
+        if ($restartTerminal) {
+            Write-Host 'Close and reopen your terminal application once so it can find the Codex command shim.' -ForegroundColor Yellow
+        }
+        else {
+            Write-Host 'Future codex commands will use this account. A Codex session already running will keep its current account.' -ForegroundColor DarkGray
+        }
         [void](Read-Host 'Press Enter to continue')
+    }
+    elseif ($restartTerminal) {
+        Write-Host 'Close and reopen your terminal application once so it can find the Codex command shim.' -ForegroundColor Yellow
     }
 }
 
