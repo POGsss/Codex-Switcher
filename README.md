@@ -16,9 +16,22 @@ Double-click `Run-CodexAccountSwitcher.cmd` to open the menu in a PowerShell win
 .\CodexAccountSwitcher.ps1
 ```
 
-On first run, the switcher adds the current default Codex profile (`%USERPROFILE%\.codex`) to the list. Choose **A** to add another account. Each added account gets a separate Codex home and requires a one-time browser sign-in. Choose its number to open Codex in the folder from which you launched the switcher.
+On first run, the current default Codex profile (`%USERPROFILE%\.codex`) is added as **Personal** and selected. Use `/add-account` to create another profile; each added account gets a separate Codex home and requires a one-time browser sign-in. Use `/switch <number>` to change the selected account.
 
-The menu refreshes usage for each profile when it opens. It displays the rate-limit windows returned by Codex, including used percentage, remaining percentage, and reset time. A window is labeled weekly or daily only when Codex reports that duration. Some accounts may return different windows or no data; those are shown as reported.
+The menu shows each account's returned rate-limit windows as usage bars, including used percentage, remaining percentage, and reset time. A window is labeled weekly or daily only when Codex reports that duration. Some accounts may return different windows or no data; those are shown as reported.
+
+The switcher uses a Codex CLI-style message prompt. Type a regular message to open Codex with that message for the selected account. Available commands:
+
+```text
+/help
+/accounts
+/switch <number>
+/open
+/add-account
+/refresh-usage
+/rename-account <number> <new label>
+/quit
+```
 
 ## Move or share the folder
 

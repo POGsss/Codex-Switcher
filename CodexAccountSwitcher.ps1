@@ -48,6 +48,30 @@ function Get-State {
         try {
             $state = Get-Content -LiteralPath $script:StatePath -Raw | ConvertFrom-Json
             if ($null -ne $state.profiles) {
+                $stateChanged = $false
+                foreach ($accountProfile in @($state.profiles)) {
+                    if ($accountProfile.id -eq 'default' -and $accountProfile.label -eq 'Default Codex account') {
+                        $accountProfile.label = 'Personal'
+                        $stateChanged = $true
+                    }
+                }
+                if ($state.PSObject.Properties.Name -notcontains 'selectedProfileId') {
+                    Add-Member -InputObject $state -MemberType NoteProperty -Name 'selectedProfileId' -Value $null
+                    $stateChanged = $true
+                }
+                if ([string]::IsNullOrWhiteSpace([string]$state.selectedProfileId)) {
+                    $personalProfile = @($state.profiles | Where-Object { $_.id -eq 'default' } | Select-Object -First 1)
+                    if ($personalProfile.Count -gt 0) {
+                        $state.selectedProfileId = $personalProfile[0].id
+                    }
+                    elseif (@($state.profiles).Count -gt 0) {
+                        $state.selectedProfileId = @($state.profiles)[0].id
+                    }
+                    $stateChanged = $true
+                }
+                if ($stateChanged) {
+                    Save-State -State $state
+                }
                 return $state
             }
         }
@@ -62,11 +86,12 @@ function Get-State {
         $defaultHome = Join-Path $env:USERPROFILE '.codex'
     }
     $state = [pscustomobject]@{
-        version  = 1
-        profiles = @(
+        version           = 1
+        selectedProfileId = 'default'
+        profiles          = @(
             [pscustomobject]@{
                 id       = 'default'
-                label    = 'Default Codex account'
+                label    = 'Personal'
                 home     = $defaultHome
                 managed  = $false
             }
@@ -245,14 +270,16 @@ function Get-ProfileSnapshot {
 function Get-WindowLabel {
     param([int]$DurationMinutes)
 
-    if ($DurationMinutes -eq 10080) { return 'weekly' }
-    if ($DurationMinutes -eq 1440) { return 'daily' }
-    if ($DurationMinutes -eq 60) { return 'hourly' }
+    if ($DurationMinutes -eq 10080) { return 'weekly limit' }
+    if ($DurationMinutes -eq 1440) { return 'daily limit' }
     if ($DurationMinutes -gt 0 -and ($DurationMinutes % 60) -eq 0) {
-        return "every $([int]($DurationMinutes / 60)) hours"
+        $hours = [int]($DurationMinutes / 60)
+        $unit = 'hours'
+        if ($hours -eq 1) { $unit = 'hour' }
+        return "$hours $unit limit"
     }
-    if ($DurationMinutes -gt 0) { return "every $DurationMinutes minutes" }
-    return 'window'
+    if ($DurationMinutes -gt 0) { return "$DurationMinutes minute limit" }
+    return 'usage limit'
 }
 
 function Get-ResetLabel {
@@ -284,38 +311,44 @@ function Write-UsageBar {
     if ($used -ge 80) { $color = 'Red' }
     elseif ($used -ge 50) { $color = 'Yellow' }
 
-    Write-Host ('    {0,-15} [{1}] {2,3}% used / {3,3}% left; {4}' -f $Label, $bar, [int][Math]::Round($used), [int][Math]::Round($remaining), $ResetLabel) -ForegroundColor $color
+    Write-Host ('  {0}: [{1}] {2,3}% used / {3,3}% left; {4}' -f $Label, $bar, [int][Math]::Round($used), [int][Math]::Round($remaining), $ResetLabel) -ForegroundColor $color
 }
 
 function Write-ProfileSnapshot {
-    param([Parameter(Mandatory = $true)]$Snapshot)
+    param(
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [Parameter(Mandatory = $true)][int]$Number,
+        [Parameter(Mandatory = $true)][bool]$IsSelected
+    )
 
     $accountProfile = $Snapshot.profile
-    Write-Host ("{0}. {1}" -f $script:MenuProfileNumbers[$accountProfile.id], $accountProfile.label) -ForegroundColor Cyan
+    $marker = ' '
+    if ($IsSelected) { $marker = '*' }
+    Write-Host ("{0}{1}. {2}" -f $marker, $Number, $accountProfile.label) -ForegroundColor Cyan
 
     if (-not $Snapshot.signedIn) {
         if ($Snapshot.accountError) {
-            Write-Host '    Sign-in or usage status unavailable.' -ForegroundColor DarkYellow
+            Write-Host '  Sign-in or usage status unavailable.' -ForegroundColor DarkYellow
         }
         else {
-            Write-Host '    Not signed in. Select this account to open Codex and sign in.' -ForegroundColor DarkYellow
+            Write-Host '  Not signed in. Select this account to open Codex and sign in.' -ForegroundColor DarkYellow
         }
         return
     }
 
     $plan = $Snapshot.account.planType
     if (-not [string]::IsNullOrWhiteSpace([string]$plan)) {
-        Write-Host ("    Signed in ({0})" -f $plan)
+        Write-Host ("  Signed in ({0})" -f $plan)
     }
     else {
-        Write-Host '    Signed in'
+        Write-Host '  Signed in'
     }
 
     $rateResult = $Snapshot.rateLimits
     if ($null -eq $rateResult) {
-        Write-Host '    Usage unavailable for this account.' -ForegroundColor DarkYellow
+        Write-Host '  Usage unavailable for this account.' -ForegroundColor DarkYellow
         if (-not [string]::IsNullOrWhiteSpace($Snapshot.usageError)) {
-            Write-Host ("    {0}" -f $Snapshot.usageError) -ForegroundColor DarkGray
+            Write-Host ("  {0}" -f $Snapshot.usageError) -ForegroundColor DarkGray
         }
         return
     }
@@ -336,9 +369,9 @@ function Write-ProfileSnapshot {
     if ($bucketEntries.Count -gt 0) {
         foreach ($bucketEntry in $bucketEntries) {
             $bucket = $bucketEntry.value
-            $bucketLabel = [string]$bucket.limitName
-            if ([string]::IsNullOrWhiteSpace($bucketLabel)) { $bucketLabel = [string]$bucket.limitId }
+            $bucketLabel = [string]$bucket.limitId
             if ([string]::IsNullOrWhiteSpace($bucketLabel)) { $bucketLabel = [string]$bucketEntry.name }
+            if ($bucketLabel -eq 'codex') { $bucketLabel = '' }
 
             foreach ($windowName in @('primary', 'secondary')) {
                 $window = $bucket.$windowName
@@ -346,14 +379,17 @@ function Write-ProfileSnapshot {
                 $windowsFound = $true
                 $duration = 0
                 if ($null -ne $window.windowDurationMins) { $duration = [int]$window.windowDurationMins }
-                $label = "{0} {1}" -f $bucketLabel, (Get-WindowLabel -DurationMinutes $duration)
+                $label = Get-WindowLabel -DurationMinutes $duration
+                if (-not [string]::IsNullOrWhiteSpace($bucketLabel)) {
+                    $label = "{0} {1}" -f $bucketLabel, $label
+                }
                 Write-UsageBar -Label $label -UsedPercent ([double]$window.usedPercent) -ResetLabel (Get-ResetLabel -Window $window)
             }
         }
     }
 
     if (-not $windowsFound) {
-        Write-Host '    No active rate-limit windows were returned.' -ForegroundColor DarkYellow
+        Write-Host '  No active rate-limit windows were returned.' -ForegroundColor DarkYellow
     }
 }
 
@@ -369,7 +405,10 @@ function Get-ProfileSnapshots {
 }
 
 function Start-Profile {
-    param([Parameter(Mandatory = $true)]$AccountProfile)
+    param(
+        [Parameter(Mandatory = $true)]$AccountProfile,
+        [string]$Message
+    )
 
     $codexPath = Get-CodexPath
     $previousEnvironment = @{}
@@ -379,7 +418,12 @@ function Start-Profile {
     }
     [Environment]::SetEnvironmentVariable('CODEX_HOME', $AccountProfile.home, 'Process')
     try {
-        & $codexPath
+        if ([string]::IsNullOrWhiteSpace($Message)) {
+            & $codexPath
+        }
+        else {
+            & $codexPath $Message
+        }
     }
     finally {
         foreach ($environmentVariable in $script:AuthEnvironmentVariables) {
@@ -453,59 +497,166 @@ function Add-Account {
     }
 
     $State.profiles = @($State.profiles) + @($profile)
+    $State.selectedProfileId = $profile.id
     Save-State -State $State
     Write-Host "Added '$label'. Its sign-in is saved on this device." -ForegroundColor Green
     [void](Read-Host 'Press Enter to continue')
 }
 
+function Get-SelectedProfile {
+    param([Parameter(Mandatory = $true)]$State)
+
+    foreach ($accountProfile in @($State.profiles)) {
+        if ($accountProfile.id -eq $State.selectedProfileId) {
+            return $accountProfile
+        }
+    }
+    if (@($State.profiles).Count -gt 0) {
+        return @($State.profiles)[0]
+    }
+    return $null
+}
+
+function Show-Help {
+    Write-Host 'Commands:' -ForegroundColor Cyan
+    Write-Host '  /help                                  Show this help'
+    Write-Host '  /accounts                              Refresh and list accounts'
+    Write-Host '  /switch <number>                       Select the active account'
+    Write-Host '  /open                                  Open Codex with an empty composer'
+    Write-Host '  /add-account                           Sign in to another ChatGPT account'
+    Write-Host '  /refresh-usage                         Refresh every account limit'
+    Write-Host '  /rename-account <number> <new label>   Rename an account'
+    Write-Host '  /quit                                  Exit the switcher'
+    Write-Host ''
+    Write-Host 'Type a regular message to open Codex with that message for the selected account.' -ForegroundColor DarkGray
+    [void](Read-Host 'Press Enter to return')
+}
+
+function Rename-Account {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][int]$Number,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $profiles = @($State.profiles)
+    if ($Number -lt 1 -or $Number -gt $profiles.Count) {
+        Write-Warning 'That account number is not in the list.'
+        return
+    }
+    $Label = $Label.Trim()
+    if ([string]::IsNullOrWhiteSpace($Label)) {
+        Write-Warning 'The account label cannot be empty.'
+        return
+    }
+    foreach ($existing in $profiles) {
+        if ($existing.id -ne $profiles[$Number - 1].id -and [string]::Equals([string]$existing.label, $Label, [StringComparison]::OrdinalIgnoreCase)) {
+            Write-Warning 'An account with that label already exists.'
+            return
+        }
+    }
+
+    $profiles[$Number - 1].label = $Label
+    $State.profiles = $profiles
+    Save-State -State $State
+    Write-Host "Renamed account $Number to '$Label'." -ForegroundColor Green
+    [void](Read-Host 'Press Enter to continue')
+}
+
 function Show-MainMenu {
     $state = Get-State
-    $codexPath = Get-CodexPath
+    $snapshots = @()
+    $refreshNeeded = $true
 
     while ($true) {
-        Clear-Host
-        Write-Host 'Codex Account Switcher' -ForegroundColor Cyan
-        Write-Host 'Usage is refreshed from Codex when this menu opens.' -ForegroundColor DarkGray
-        Write-Host ''
-
-        $script:MenuProfileNumbers = @{}
-        $number = 1
-        foreach ($profile in @($state.profiles)) {
-            $script:MenuProfileNumbers[$profile.id] = $number
-            $number++
+        if ($refreshNeeded) {
+            Clear-Host
+            Write-Host 'Refreshing Codex account usage...' -ForegroundColor DarkGray
+            $snapshots = @(Get-ProfileSnapshots -State $state)
+            $refreshNeeded = $false
         }
 
-        if (@($state.profiles).Count -eq 0) {
-            Write-Host 'No accounts have been added yet.' -ForegroundColor DarkYellow
+        Clear-Host
+        Write-Host '+--------------------------------------------------------------------------+' -ForegroundColor DarkCyan
+        Write-Host '| Codex Account Switcher                                                   |' -ForegroundColor Cyan
+        Write-Host '+--------------------------------------------------------------------------+' -ForegroundColor DarkCyan
+
+        if ($snapshots.Count -eq 0) {
+            Write-Host 'No accounts yet. Use /add-account to sign in.' -ForegroundColor DarkYellow
         }
         else {
-            foreach ($snapshot in @(Get-ProfileSnapshots -State $state)) {
-                Write-ProfileSnapshot -Snapshot $snapshot
+            $number = 1
+            foreach ($snapshot in $snapshots) {
+                $selected = ($snapshot.profile.id -eq $state.selectedProfileId)
+                Write-ProfileSnapshot -Snapshot $snapshot -Number $number -IsSelected $selected
                 Write-Host ''
+                $number++
             }
         }
 
-        Write-Host 'Choose an account number to open Codex.'
-        Write-Host 'A. Add account    R. Refresh usage    Q. Quit'
-        $choice = (Read-Host 'Selection').Trim()
+        Write-Host '+--------------------------------------------------------------------------+' -ForegroundColor DarkCyan
+        Write-Host 'Type a message to start Codex with the selected account.' -ForegroundColor DarkGray
+        Write-Host 'Commands: /help  /switch <number>  /open  /add-account  /refresh-usage'
+        Write-Host '          /accounts  /rename-account <number> <label>  /quit'
+        $choice = (Read-Host '>').Trim()
 
-        if ($choice -match '(?i)^q$') { return }
-        if ($choice -match '(?i)^a$') {
+        if ([string]::IsNullOrWhiteSpace($choice)) { continue }
+        if ($choice -match '(?i)^/(quit|exit)$') { return }
+        if ($choice -match '(?i)^/help$') {
+            Show-Help
+            continue
+        }
+        if ($choice -match '(?i)^/refresh-usage$' -or $choice -match '(?i)^/accounts$') {
+            $refreshNeeded = $true
+            continue
+        }
+        if ($choice -match '(?i)^/add-account$') {
             Add-Account -State $state
             $state = Get-State
+            $refreshNeeded = $true
             continue
         }
-        if ($choice -match '(?i)^r$') { continue }
-
-        $selectedNumber = 0
-        if ([int]::TryParse($choice, [ref]$selectedNumber) -and $selectedNumber -ge 1 -and $selectedNumber -le @($state.profiles).Count) {
-            $selectedProfile = @($state.profiles)[$selectedNumber - 1]
+        if ($choice -match '(?i)^/switch\s+(\d+)\s*$') {
+            $selectedNumber = [int]$Matches[1]
+            $profiles = @($state.profiles)
+            if ($selectedNumber -lt 1 -or $selectedNumber -gt $profiles.Count) {
+                Write-Warning 'That account number is not in the list.'
+                Start-Sleep -Seconds 1
+                continue
+            }
+            $state.selectedProfileId = $profiles[$selectedNumber - 1].id
+            Save-State -State $state
+            continue
+        }
+        if ($choice -match '(?i)^/rename-account\s+(\d+)\s+(.+)$') {
+            Rename-Account -State $state -Number ([int]$Matches[1]) -Label $Matches[2]
+            continue
+        }
+        if ($choice -match '(?i)^/open$') {
+            $selectedProfile = Get-SelectedProfile -State $state
+            if ($null -eq $selectedProfile) {
+                Write-Warning 'Add an account first with /add-account.'
+                Start-Sleep -Seconds 1
+                continue
+            }
             Start-Profile -AccountProfile $selectedProfile
+            $refreshNeeded = $true
+            continue
+        }
+        if ($choice.StartsWith('/')) {
+            Write-Warning 'Unknown command. Type /help to see the available commands.'
+            Start-Sleep -Seconds 1
             continue
         }
 
-        Write-Warning 'Choose a listed number, A, R, or Q.'
-        Start-Sleep -Seconds 1
+        $selectedProfile = Get-SelectedProfile -State $state
+        if ($null -eq $selectedProfile) {
+            Write-Warning 'Add an account first with /add-account.'
+            Start-Sleep -Seconds 1
+            continue
+        }
+        Start-Profile -AccountProfile $selectedProfile -Message $choice
+        $refreshNeeded = $true
     }
 }
 
