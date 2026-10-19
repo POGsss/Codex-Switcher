@@ -18,7 +18,7 @@ try {
     }
 
     $env:CODEX_HOME = [string]$selectedProfile[0].home
-    & $codexPath @args
+    & $codexPath --no-daemon @args
     if ($null -ne $LASTEXITCODE) {
         exit $LASTEXITCODE
     }

@@ -448,10 +448,10 @@ function Start-Profile {
     [Environment]::SetEnvironmentVariable('CODEX_HOME', $AccountProfile.home, 'Process')
     try {
         if ([string]::IsNullOrWhiteSpace($Message)) {
-            & $codexPath
+            & $codexPath --no-daemon
         }
         else {
-            & $codexPath $Message
+            & $codexPath --no-daemon $Message
         }
     }
     finally {
@@ -500,7 +500,7 @@ function Add-Account {
     }
     [Environment]::SetEnvironmentVariable('CODEX_HOME', $profileHome, 'Process')
     try {
-        & (Get-CodexPath) login
+        & (Get-CodexPath) --no-daemon login
         if ($LASTEXITCODE -ne 0) {
             Write-Warning 'Sign-in did not complete. This profile was not added.'
             [void](Read-Host 'Press Enter to continue')

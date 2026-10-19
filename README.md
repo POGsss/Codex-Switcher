@@ -45,6 +45,6 @@ This state is separate from this folder, so moving the launcher on the same comp
 
 ## Usage data and compatibility
 
-Usage comes from the local Codex App Server's `account/rateLimits/read` request. The App Server interface is experimental and can change between Codex CLI releases. If usage cannot be read, the switcher still lets you open that profile and labels its usage as unavailable. It does not estimate a limit or store credentials in this launcher folder.
+Usage comes from the local Codex App Server's `account/rateLimits/read` request. The App Server interface is experimental and can change between Codex CLI releases. If usage cannot be read, the switcher still lets you open that profile and labels its usage as unavailable. CLI launches use `--no-daemon` to avoid the Windows socket path-length error with separate account homes. The launcher does not estimate a limit or store credentials in this folder.
 
 Profiles have separate Codex settings, sign-ins, and local conversation histories. The default profile points to `%USERPROFILE%\.codex`; added profiles use separate folders under the switcher's local app-data directory.
