@@ -10,7 +10,7 @@ A portable PowerShell launcher for switching between saved Codex CLI ChatGPT acc
 
 ## Start it
 
-Open PowerShell in this folder and run:
+Double-click `Run-CodexAccountSwitcher.cmd` to open the menu in a PowerShell window, or open PowerShell in this folder and run:
 
 ```powershell
 .\CodexAccountSwitcher.ps1
