@@ -16,6 +16,22 @@ $script:AuthEnvironmentVariables = @(
 )
 $script:CodexApplication = Get-Command codex -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 
+function Broadcast-EnvironmentChange {
+    if (-not ('CodexSwitcherEnvironmentBroadcast' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class CodexSwitcherEnvironmentBroadcast {
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint message, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);
+}
+'@
+    }
+
+    $result = [UIntPtr]::Zero
+    [void][CodexSwitcherEnvironmentBroadcast]::SendMessageTimeout([IntPtr](-1), [uint32]0x1A, [UIntPtr]::Zero, 'Environment', [uint32]2, [uint32]1000, [ref]$result)
+}
+
 function Get-CodexPath {
     if (Test-Path -LiteralPath $script:RealCodexPathFile) {
         $savedPath = (Get-Content -LiteralPath $script:RealCodexPathFile -Raw).Trim()
@@ -561,6 +577,7 @@ function Install-CodexProxy {
     $processPathEntries = @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $proxyAlreadyOnProcessPath = @($processPathEntries | Where-Object { [string]::Equals($_.TrimEnd('\'), $script:ProxyRoot.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
     if (-not $proxyAlreadyOnProcessPath) { $env:Path = "$($script:ProxyRoot);$env:Path" }
+    Broadcast-EnvironmentChange
 
     return (-not $proxyAlreadyOnUserPath -or -not $proxyAlreadyOnProcessPath)
 }
