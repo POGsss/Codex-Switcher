@@ -624,6 +624,7 @@ function Read-MenuInput {
 
     while ($true) {
         $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+        $virtualKeyCode = [int]$key.VirtualKeyCode
 
         if ($placeholderVisible) {
             [Console]::SetCursorPosition($origin.X, $origin.Y)
@@ -632,35 +633,35 @@ function Read-MenuInput {
             $placeholderVisible = $false
         }
 
-        if ($key.Key -eq 'Enter') {
+        if ($virtualKeyCode -eq 13) {
             [Console]::SetCursorPosition($origin.X + $cursor, $origin.Y)
             [Console]::WriteLine()
             return -join $characters.ToArray()
         }
-        if ($key.Key -eq 'Escape') {
+        if ($virtualKeyCode -eq 27) {
             [Console]::SetCursorPosition($origin.X, $origin.Y)
             [Console]::Write((' ' * $renderedLength))
             [Console]::SetCursorPosition($origin.X, $origin.Y)
             [Console]::WriteLine()
             return ''
         }
-        if ($key.Key -eq 'Backspace' -and $cursor -gt 0) {
+        if ($virtualKeyCode -eq 8 -and $cursor -gt 0) {
             $characters.RemoveAt($cursor - 1)
             $cursor = $cursor - 1
         }
-        elseif ($key.Key -eq 'Delete' -and $cursor -lt $characters.Count) {
+        elseif ($virtualKeyCode -eq 46 -and $cursor -lt $characters.Count) {
             $characters.RemoveAt($cursor)
         }
-        elseif ($key.Key -eq 'LeftArrow' -and $cursor -gt 0) {
+        elseif ($virtualKeyCode -eq 37 -and $cursor -gt 0) {
             $cursor = $cursor - 1
         }
-        elseif ($key.Key -eq 'RightArrow' -and $cursor -lt $characters.Count) {
+        elseif ($virtualKeyCode -eq 39 -and $cursor -lt $characters.Count) {
             $cursor = $cursor + 1
         }
-        elseif ($key.Key -eq 'Home') {
+        elseif ($virtualKeyCode -eq 36) {
             $cursor = 0
         }
-        elseif ($key.Key -eq 'End') {
+        elseif ($virtualKeyCode -eq 35) {
             $cursor = $characters.Count
         }
         elseif (-not [char]::IsControl($key.Character)) {
