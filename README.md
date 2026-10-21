@@ -16,7 +16,7 @@ Double-click `Run-CodexSwitcher.cmd` to open the menu in a PowerShell window, or
 .\CodexSwitcher.ps1
 ```
 
-On first run, the current default Codex profile (`%USERPROFILE%\.codex`) is added as **Personal** and selected. Use `/add-account` to create another profile; each added account gets a separate Codex home and requires a one-time browser sign-in. Enter an account number or use `/switch <number>` to switch. The launcher installs a small `codex` command shim in your Windows user profile; it reads the selected account each time you run `codex`. Restart terminal applications once after the first switch so they pick up the shim's PATH entry.
+On first run, the current default Codex profile (`%USERPROFILE%\.codex`) is added as **Personal** and selected. Use `/add-account` to create another profile; each added account requires a one-time browser sign-in. Enter an account number or use `/switch <number>` to switch. The launcher installs a small `codex` command shim in your Windows user profile; it reads the selected account each time you run `codex`. Restart terminal applications once after the first switch so they pick up the shim's PATH entry.
 
 The menu shows each account's returned rate-limit windows as usage bars, including used percentage, remaining percentage, and reset time. A window is labeled weekly or daily only when Codex reports that duration. Some accounts may return different windows or no data; those are shown as reported.
 
@@ -27,15 +27,35 @@ The switcher uses a Codex CLI-style message prompt. Enter an account number to s
 /accounts
 /switch <number>
 /open
+/resume
 /add-account
 /refresh-usage
 /rename-account <number> <new label>
+/shared-convo [on|off]
 /quit
 ```
 
+## Shared conversation history
+
+By default, conversation history, session rollouts, and CLI command history are **shared across accounts**. Each profile keeps its own saved sign-in; while shared mode is active, the selected profile's auth file is copied into the shared Codex home for the CLI and synced back afterward. The switcher menu displays the current status directly below the title banner:
+- `Shared conversations: [ON]` (Green): all accounts share the same conversation history.
+- `Shared conversations: [OFF]` (Yellow): each account keeps its own private conversation history.
+
+Commands:
+- `/shared-convo on`: Turn on shared conversations.
+- `/shared-convo off`: Turn off shared conversations (isolated per account).
+- `/shared-convo`: Toggle between on and off instantly without reloading or refetching account limits.
+
+When sharing is on, switch accounts and continue working in the same conversations:
+- Use `/resume` in the switcher menu to open the session picker with the selected account.
+- Conversations created by any account remain visible in the session picker across all accounts.
+- Existing conversations from previously isolated profiles are automatically imported into the shared conversation store.
+
+Turning sharing off makes each account use its own Codex home again. Shared conversations remain in the shared store and become available again when sharing is turned back on.
+
 ## Move or share the folder
 
-The switcher keeps its account list and profile homes under:
+The switcher keeps its account list and profile credentials under:
 
 ```text
 %LOCALAPPDATA%\CodexAccountSwitcher\
@@ -47,4 +67,4 @@ This state is separate from this folder, so moving the launcher on the same comp
 
 Usage comes from the local Codex App Server's `account/rateLimits/read` request. The App Server interface is experimental and can change between Codex CLI releases. If usage cannot be read, the switcher still lets you open that profile and labels its usage as unavailable. CLI launches use `--no-daemon` to avoid the Windows socket path-length error with separate account homes. The launcher does not estimate a limit or store credentials in this folder.
 
-Profiles have separate Codex settings, sign-ins, and local conversation histories. The default profile points to `%USERPROFILE%\.codex`; added profiles use separate folders under the switcher's local app-data directory.
+Per-profile sign-ins are stored under the switcher's local app-data directory. In shared conversation mode, the conversation store is `%LOCALAPPDATA%\CodexAccountSwitcher\shared`; in isolated mode, each account uses its own Codex home, including `%USERPROFILE%\.codex` for the Personal profile. The shared home also contains a copy of the active profile's auth file, so do not share the switcher's data folder with another person or PC.

@@ -1,4 +1,4 @@
-param()
+﻿param()
 
 $ErrorActionPreference = 'Stop'
 
@@ -7,6 +7,12 @@ $script:ProfilesRoot = Join-Path $script:DataRoot 'profiles'
 $script:StatePath = Join-Path $script:DataRoot 'profiles.json'
 $script:ProxyRoot = Join-Path $script:DataRoot 'bin'
 $script:RealCodexPathFile = Join-Path $script:DataRoot 'codex-path.txt'
+$script:DefaultCodexHome = Join-Path $env:USERPROFILE '.codex'
+if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME) -and -not $env:CODEX_HOME.StartsWith($script:ProfilesRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    $script:DefaultCodexHome = $env:CODEX_HOME
+}
+$script:SharedHome = Join-Path $script:DataRoot 'shared'
+
 $script:AuthEnvironmentVariables = @(
     'CODEX_HOME',
     'CODEX_ACCESS_TOKEN',
@@ -67,6 +73,246 @@ function Save-State {
     Move-Item -LiteralPath $temporaryPath -Destination $script:StatePath -Force
 }
 
+function Sync-ProfileAuth {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProfileId,
+        [string]$SharedHome = $script:SharedHome,
+        [string]$SourceHome
+    )
+
+    $authHome = if ($SourceHome) { $SourceHome } else { $SharedHome }
+    $sourceAuth = Join-Path $authHome 'auth.json'
+    $profileDir = Join-Path $script:ProfilesRoot $ProfileId
+    $profileAuth = Join-Path $profileDir 'auth.json'
+
+    if ((Test-Path -LiteralPath $sourceAuth) -and (Test-Path -LiteralPath $profileDir)) {
+        try {
+            $sourceFullPath = [System.IO.Path]::GetFullPath($sourceAuth)
+            $profileFullPath = [System.IO.Path]::GetFullPath($profileAuth)
+            if (-not [string]::Equals($sourceFullPath, $profileFullPath, [StringComparison]::OrdinalIgnoreCase)) {
+                [System.IO.File]::Copy($sourceAuth, $profileAuth, $true)
+            }
+        }
+        catch {}
+    }
+}
+
+function Deploy-ProfileAuth {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProfileId,
+        [string]$SharedHome = $script:SharedHome
+    )
+
+    $profileDir = Join-Path $script:ProfilesRoot $ProfileId
+    $profileAuth = Join-Path $profileDir 'auth.json'
+    $sharedAuth = Join-Path $SharedHome 'auth.json'
+
+    if (Test-Path -LiteralPath $profileAuth) {
+        if (-not (Test-Path -LiteralPath $SharedHome)) {
+            New-Item -ItemType Directory -Path $SharedHome -Force | Out-Null
+        }
+        $needCopy = $true
+        if (Test-Path -LiteralPath $sharedAuth) {
+            try {
+                $pBytes = [System.IO.File]::ReadAllBytes($profileAuth)
+                $sBytes = [System.IO.File]::ReadAllBytes($sharedAuth)
+                if ($pBytes.Length -eq $sBytes.Length) {
+                    $identical = $true
+                    for ($i = 0; $i -lt $pBytes.Length; $i++) {
+                        if ($pBytes[$i] -ne $sBytes[$i]) {
+                            $identical = $false
+                            break
+                        }
+                    }
+                    if ($identical) { $needCopy = $false }
+                }
+            }
+            catch {}
+        }
+        if ($needCopy) {
+            [System.IO.File]::Copy($profileAuth, $sharedAuth, $true)
+        }
+    }
+}
+
+function Import-ProfileConversations {
+    param(
+        [Parameter(Mandatory = $true)]$Profile,
+        [string]$SharedHome = $script:SharedHome
+    )
+
+    $sourceHome = [string]$Profile.home
+    if ([string]::IsNullOrWhiteSpace($sourceHome) -or -not (Test-Path -LiteralPath $sourceHome)) {
+        return
+    }
+    try {
+        $sourceFullPath = [System.IO.Path]::GetFullPath($sourceHome).TrimEnd('\')
+        $sharedFullPath = [System.IO.Path]::GetFullPath($SharedHome).TrimEnd('\')
+    }
+    catch {
+        return
+    }
+    if ([string]::Equals($sourceFullPath, $sharedFullPath, [StringComparison]::OrdinalIgnoreCase)) {
+        return
+    }
+    if (-not (Test-Path -LiteralPath $SharedHome)) {
+        New-Item -ItemType Directory -Path $SharedHome -Force | Out-Null
+    }
+
+    # 1. Copy missing rollout files from sessions directory
+    $srcSessions = Join-Path $sourceHome 'sessions'
+    $dstSessions = Join-Path $SharedHome 'sessions'
+    if (Test-Path -LiteralPath $srcSessions) {
+        if (-not (Test-Path -LiteralPath $dstSessions)) {
+            New-Item -ItemType Directory -Path $dstSessions -Force | Out-Null
+        }
+        $rolloutFiles = Get-ChildItem -LiteralPath $srcSessions -Recurse -Filter '*.jsonl' -File -ErrorAction SilentlyContinue
+        foreach ($file in $rolloutFiles) {
+            $relPath = $file.FullName.Substring($srcSessions.Length).TrimStart('\')
+            $targetPath = Join-Path $dstSessions $relPath
+            if (-not (Test-Path -LiteralPath $targetPath)) {
+                $targetDir = [System.IO.Path]::GetDirectoryName($targetPath)
+                if (-not (Test-Path -LiteralPath $targetDir)) {
+                    New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+                }
+                Copy-Item -LiteralPath $file.FullName -Destination $targetPath -Force
+            }
+        }
+    }
+
+    # 2. Merge session_index.jsonl
+    $srcIndex = Join-Path $sourceHome 'session_index.jsonl'
+    $dstIndex = Join-Path $SharedHome 'session_index.jsonl'
+    if (Test-Path -LiteralPath $srcIndex) {
+        $existingLines = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        if (Test-Path -LiteralPath $dstIndex) {
+            foreach ($line in [System.IO.File]::ReadAllLines($dstIndex)) {
+                if (-not [string]::IsNullOrWhiteSpace($line)) {
+                    [void]$existingLines.Add($line.Trim())
+                }
+            }
+        }
+        $newLines = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($line in [System.IO.File]::ReadAllLines($srcIndex)) {
+            $trimmed = $line.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($trimmed) -and -not $existingLines.Contains($trimmed)) {
+                [void]$newLines.Add($trimmed)
+                [void]$existingLines.Add($trimmed)
+            }
+        }
+        if ($newLines.Count -gt 0) {
+            [System.IO.File]::AppendAllLines($dstIndex, $newLines, [System.Text.UTF8Encoding]::new($false))
+        }
+    }
+
+    # 3. Merge history.jsonl
+    $srcHist = Join-Path $sourceHome 'history.jsonl'
+    $dstHist = Join-Path $SharedHome 'history.jsonl'
+    if (Test-Path -LiteralPath $srcHist) {
+        $existingHist = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        if (Test-Path -LiteralPath $dstHist) {
+            foreach ($line in [System.IO.File]::ReadAllLines($dstHist)) {
+                if (-not [string]::IsNullOrWhiteSpace($line)) {
+                    [void]$existingHist.Add($line.Trim())
+                }
+            }
+        }
+        $newHist = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($line in [System.IO.File]::ReadAllLines($srcHist)) {
+            $trimmed = $line.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($trimmed) -and -not $existingHist.Contains($trimmed)) {
+                [void]$newHist.Add($trimmed)
+                [void]$existingHist.Add($trimmed)
+            }
+        }
+        if ($newHist.Count -gt 0) {
+            [System.IO.File]::AppendAllLines($dstHist, $newHist, [System.Text.UTF8Encoding]::new($false))
+        }
+    }
+
+    # 4. Merge the Codex SQLite stores using SQLite's backup API so committed WAL data is included.
+    $pythonCmd = Get-Command python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $pythonCmd) {
+        $srcStateDb = Join-Path $sourceHome 'state_5.sqlite'
+        $dstStateDb = Join-Path $SharedHome 'state_5.sqlite'
+        $srcHistoryDb = Join-Path $sourceHome 'thread_history_1.sqlite'
+        $dstHistoryDb = Join-Path $SharedHome 'thread_history_1.sqlite'
+
+        if ((Test-Path -LiteralPath $srcStateDb) -or (Test-Path -LiteralPath $srcHistoryDb)) {
+            $mergePyPath = Join-Path $script:DataRoot 'merge-db.py'
+            $pyCode = @'
+import os, sqlite3, sys, traceback
+
+def quote(identifier):
+    return '"' + identifier.replace('"', '""') + '"'
+
+def merge_db(src_path, dst_path, table_names):
+    if not os.path.isfile(src_path):
+        return
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    if not os.path.isfile(dst_path):
+        with sqlite3.connect(src_path, timeout=15) as source, sqlite3.connect(dst_path, timeout=15) as destination:
+            source.backup(destination)
+        return
+
+    conn = sqlite3.connect(dst_path, timeout=15)
+    try:
+        conn.execute('PRAGMA foreign_keys=OFF')
+        conn.execute('ATTACH DATABASE ? AS src', (src_path,))
+        for table_name in table_names:
+            table_id = quote(table_name)
+            source_cols = [row[1] for row in conn.execute(f'PRAGMA src.table_info({table_id})')]
+            if not source_cols:
+                continue
+            target_cols = [row[1] for row in conn.execute(f'PRAGMA main.table_info({table_id})')]
+            if not target_cols:
+                ddl = conn.execute(
+                    "SELECT sql FROM src.sqlite_master WHERE type='table' AND name=?",
+                    (table_name,),
+                ).fetchone()
+                if not ddl or not ddl[0]:
+                    continue
+                conn.execute(ddl[0])
+                target_cols = [row[1] for row in conn.execute(f'PRAGMA main.table_info({table_id})')]
+            common_cols = [name for name in target_cols if name in source_cols]
+            if not common_cols:
+                continue
+            cols_sql = ', '.join(quote(name) for name in common_cols)
+            conn.execute(
+                f'INSERT OR IGNORE INTO main.{table_id} ({cols_sql}) '
+                f'SELECT {cols_sql} FROM src.{table_id}'
+            )
+        conn.commit()
+    finally:
+        try:
+            conn.execute('DETACH DATABASE src')
+        except sqlite3.Error:
+            pass
+        conn.close()
+
+if len(sys.argv) >= 5:
+    src_state, dst_state, src_hist, dst_hist = sys.argv[1:5]
+    try:
+        merge_db(src_state, dst_state, ['threads'])
+        merge_db(src_hist, dst_hist, ['thread_turns', 'thread_items'])
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)
+'@
+            try {
+                [System.IO.File]::WriteAllText($mergePyPath, $pyCode, [System.Text.UTF8Encoding]::new($false))
+                & $pythonCmd.Source $mergePyPath $srcStateDb $dstStateDb $srcHistoryDb $dstHistoryDb
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warning "Could not merge Codex conversation database from '$sourceHome'. The session files were still copied."
+                }
+            }
+            catch {
+                Write-Warning "Could not merge Codex conversation database from '$sourceHome'. Details: $($_.Exception.Message)"
+            }
+        }
+    }
+}
+
 function Get-State {
     if (-not (Test-Path -LiteralPath $script:DataRoot)) {
         New-Item -ItemType Directory -Path $script:DataRoot -Force | Out-Null
@@ -75,36 +321,10 @@ function Get-State {
         New-Item -ItemType Directory -Path $script:ProfilesRoot -Force | Out-Null
     }
 
+    $state = $null
     if (Test-Path -LiteralPath $script:StatePath) {
         try {
             $state = Get-Content -LiteralPath $script:StatePath -Raw | ConvertFrom-Json
-            if ($null -ne $state.profiles) {
-                $stateChanged = $false
-                foreach ($accountProfile in @($state.profiles)) {
-                    if ($accountProfile.id -eq 'default' -and $accountProfile.label -eq 'Default Codex account') {
-                        $accountProfile.label = 'Personal'
-                        $stateChanged = $true
-                    }
-                }
-                if ($state.PSObject.Properties.Name -notcontains 'selectedProfileId') {
-                    Add-Member -InputObject $state -MemberType NoteProperty -Name 'selectedProfileId' -Value $null
-                    $stateChanged = $true
-                }
-                if ([string]::IsNullOrWhiteSpace([string]$state.selectedProfileId)) {
-                    $personalProfile = @($state.profiles | Where-Object { $_.id -eq 'default' } | Select-Object -First 1)
-                    if ($personalProfile.Count -gt 0) {
-                        $state.selectedProfileId = $personalProfile[0].id
-                    }
-                    elseif (@($state.profiles).Count -gt 0) {
-                        $state.selectedProfileId = @($state.profiles)[0].id
-                    }
-                    $stateChanged = $true
-                }
-                if ($stateChanged) {
-                    Save-State -State $state
-                }
-                return $state
-            }
         }
         catch {
             Write-Warning "The account list could not be read. A backup is saved as profiles.json.broken. Details: $($_.Exception.Message)"
@@ -112,23 +332,147 @@ function Get-State {
         }
     }
 
-    $defaultHome = $env:CODEX_HOME
-    if ([string]::IsNullOrWhiteSpace($defaultHome)) {
-        $defaultHome = Join-Path $env:USERPROFILE '.codex'
+    $stateChanged = $false
+    if ($null -eq $state -or $null -eq $state.profiles) {
+        $state = [pscustomobject]@{
+            version            = 1
+            selectedProfileId  = 'default'
+            shareConversations = $true
+            sharedHome         = $script:SharedHome
+            profiles           = @(
+                [pscustomobject]@{
+                    id       = 'default'
+                    label    = 'Personal'
+                    home     = $script:DefaultCodexHome
+                    managed  = $false
+                }
+            )
+        }
+        $stateChanged = $true
     }
-    $state = [pscustomobject]@{
-        version           = 1
-        selectedProfileId = 'default'
-        profiles          = @(
-            [pscustomobject]@{
-                id       = 'default'
-                label    = 'Personal'
-                home     = $defaultHome
-                managed  = $false
+    else {
+        foreach ($accountProfile in @($state.profiles)) {
+            if ($accountProfile.id -eq 'default' -and $accountProfile.label -eq 'Default Codex account') {
+                $accountProfile.label = 'Personal'
+                $stateChanged = $true
             }
-        )
+        }
+        if ($state.PSObject.Properties.Name -notcontains 'selectedProfileId') {
+            Add-Member -InputObject $state -MemberType NoteProperty -Name 'selectedProfileId' -Value $null
+            $stateChanged = $true
+        }
+        if ($state.PSObject.Properties.Name -notcontains 'shareConversations') {
+            Add-Member -InputObject $state -MemberType NoteProperty -Name 'shareConversations' -Value $true
+            $stateChanged = $true
+        }
+        if ($null -eq $state.shareConversations) {
+            $state.shareConversations = $true
+            $stateChanged = $true
+        }
+        if ($state.PSObject.Properties.Name -notcontains 'sharedHome') {
+            Add-Member -InputObject $state -MemberType NoteProperty -Name 'sharedHome' -Value $script:SharedHome
+            $stateChanged = $true
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$state.sharedHome)) {
+            $state.sharedHome = $script:SharedHome
+            $stateChanged = $true
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$state.selectedProfileId)) {
+            $personalProfile = @($state.profiles | Where-Object { $_.id -eq 'default' } | Select-Object -First 1)
+            if ($personalProfile.Count -gt 0) {
+                $state.selectedProfileId = $personalProfile[0].id
+            }
+            elseif (@($state.profiles).Count -gt 0) {
+                $state.selectedProfileId = @($state.profiles)[0].id
+            }
+            $stateChanged = $true
+        }
     }
-    Save-State -State $state
+
+    # A shared store must be separate from every profile home so turning sharing
+    # off returns each account to its own conversation history.
+    $legacySharedHome = [string]$state.sharedHome
+    $sharedHomeMatchesProfile = $false
+    foreach ($accountProfile in @($state.profiles)) {
+        if ([string]::IsNullOrWhiteSpace([string]$accountProfile.home)) { continue }
+        try {
+            $profileHomeFull = [System.IO.Path]::GetFullPath([string]$accountProfile.home).TrimEnd('\')
+            $sharedHomeFull = [System.IO.Path]::GetFullPath($legacySharedHome).TrimEnd('\')
+            if ([string]::Equals($profileHomeFull, $sharedHomeFull, [StringComparison]::OrdinalIgnoreCase)) {
+                $sharedHomeMatchesProfile = $true
+                break
+            }
+        }
+        catch {}
+    }
+    if ($sharedHomeMatchesProfile) {
+        $state.sharedHome = $script:SharedHome
+        $stateChanged = $true
+    }
+
+    # Ensure default profile has dedicated auth storage
+    $defaultProfileDir = Join-Path $script:ProfilesRoot 'default'
+    if (-not (Test-Path -LiteralPath $defaultProfileDir)) {
+        New-Item -ItemType Directory -Path $defaultProfileDir -Force | Out-Null
+    }
+    $defaultAuthFile = Join-Path $defaultProfileDir 'auth.json'
+    if (-not (Test-Path -LiteralPath $defaultAuthFile)) {
+        $defaultProfile = @($state.profiles | Where-Object { $_.id -eq 'default' } | Select-Object -First 1)
+        if ($defaultProfile.Count -gt 0) {
+            $defaultHomeAuth = Join-Path ([string]$defaultProfile[0].home) 'auth.json'
+            if (Test-Path -LiteralPath $defaultHomeAuth) {
+                Copy-Item -LiteralPath $defaultHomeAuth -Destination $defaultAuthFile -Force
+            }
+        }
+    }
+    $defaultConfigFile = Join-Path $defaultProfileDir 'config.toml'
+    if (-not (Test-Path -LiteralPath $defaultConfigFile)) {
+        $defaultProfile = @($state.profiles | Where-Object { $_.id -eq 'default' } | Select-Object -First 1)
+        $defaultHomeConfig = if ($defaultProfile.Count -gt 0) { Join-Path ([string]$defaultProfile[0].home) 'config.toml' } else { $null }
+        if ($defaultHomeConfig -and (Test-Path -LiteralPath $defaultHomeConfig)) {
+            Copy-Item -LiteralPath $defaultHomeConfig -Destination $defaultConfigFile -Force
+        }
+        else {
+            [System.IO.File]::WriteAllText($defaultConfigFile, "cli_auth_credentials_store = `"file`"`r`n", [System.Text.UTF8Encoding]::new($false))
+        }
+    }
+
+    $activeSharedHome = [string]$state.sharedHome
+    if (-not (Test-Path -LiteralPath $activeSharedHome)) {
+        New-Item -ItemType Directory -Path $activeSharedHome -Force | Out-Null
+    }
+    $sharedConfigFile = Join-Path $activeSharedHome 'config.toml'
+    if (-not (Test-Path -LiteralPath $sharedConfigFile)) {
+        $defaultProfile = @($state.profiles | Where-Object { $_.id -eq 'default' } | Select-Object -First 1)
+        if ($defaultProfile.Count -gt 0) {
+            $defaultHomeConfig = Join-Path ([string]$defaultProfile[0].home) 'config.toml'
+            if (Test-Path -LiteralPath $defaultHomeConfig) {
+                Copy-Item -LiteralPath $defaultHomeConfig -Destination $sharedConfigFile -Force
+            }
+        }
+        if (-not (Test-Path -LiteralPath $sharedConfigFile)) {
+            [System.IO.File]::WriteAllText($sharedConfigFile, "cli_auth_credentials_store = `"file`"`r`n", [System.Text.UTF8Encoding]::new($false))
+        }
+    }
+
+    if ($state.shareConversations) {
+        # Consolidate existing conversations from all profiles into shared home
+        foreach ($accountProfile in @($state.profiles)) {
+            Import-ProfileConversations -Profile $accountProfile -SharedHome $activeSharedHome
+        }
+        if (-not [string]::IsNullOrWhiteSpace($legacySharedHome) -and -not $sharedHomeMatchesProfile) {
+            $legacySharedProfile = [pscustomobject]@{ home = $legacySharedHome }
+            Import-ProfileConversations -Profile $legacySharedProfile -SharedHome $activeSharedHome
+        }
+        # Ensure active profile credentials are deployed to shared home
+        if (-not [string]::IsNullOrWhiteSpace([string]$state.selectedProfileId)) {
+            Deploy-ProfileAuth -ProfileId $state.selectedProfileId -SharedHome $activeSharedHome
+        }
+    }
+
+    if ($stateChanged) {
+        Save-State -State $state
+    }
     return $state
 }
 
@@ -265,25 +609,36 @@ function Invoke-AppServerRequest {
     }
 }
 
+function Get-ProfileAuthHome {
+    param([Parameter(Mandatory = $true)]$AccountProfile)
+
+    $profileDir = Join-Path $script:ProfilesRoot $AccountProfile.id
+    if (Test-Path -LiteralPath (Join-Path $profileDir 'auth.json')) {
+        return $profileDir
+    }
+    return [string]$AccountProfile.home
+}
+
 function Get-ProfileSnapshot {
     param([Parameter(Mandatory = $true)]$AccountProfile)
 
     $snapshot = [pscustomobject]@{
-        profile     = $AccountProfile
-        account     = $null
-        rateLimits  = $null
-        signedIn    = $false
-        usageError  = $null
+        profile      = $AccountProfile
+        account      = $null
+        rateLimits   = $null
+        signedIn     = $false
+        usageError   = $null
         accountError = $null
     }
 
+    $authHome = Get-ProfileAuthHome -AccountProfile $AccountProfile
     try {
-        $accountResult = Invoke-AppServerRequest -CodexHome $AccountProfile.home -Method 'account/read' -ParametersJson '{"refreshToken":false}'
+        $accountResult = Invoke-AppServerRequest -CodexHome $authHome -Method 'account/read' -ParametersJson '{"refreshToken":false}'
         $snapshot.account = $accountResult.account
         $snapshot.signedIn = ($null -ne $accountResult.account)
         if ($snapshot.signedIn) {
             try {
-                $limitResult = Invoke-AppServerRequest -CodexHome $AccountProfile.home -Method 'account/rateLimits/read'
+                $limitResult = Invoke-AppServerRequest -CodexHome $authHome -Method 'account/rateLimits/read'
                 $snapshot.rateLimits = $limitResult
             }
             catch {
@@ -435,19 +790,41 @@ function Get-ProfileSnapshots {
 
 function Start-Profile {
     param(
+        [Parameter(Mandatory = $true)]$State,
         [Parameter(Mandatory = $true)]$AccountProfile,
-        [string]$Message
+        [string]$Message,
+        [switch]$Resume
     )
 
     $codexPath = Get-CodexPath
     $previousEnvironment = @{}
-    foreach ($environmentVariable in $script:AuthEnvironmentVariables) {
-        $previousEnvironment[$environmentVariable] = [Environment]::GetEnvironmentVariable($environmentVariable, 'Process')
-        [Environment]::SetEnvironmentVariable($environmentVariable, $null, 'Process')
-    }
-    [Environment]::SetEnvironmentVariable('CODEX_HOME', $AccountProfile.home, 'Process')
+    $shareConvo = ($null -eq $State.shareConversations) -or ($State.shareConversations -eq $true)
+    $sharedHome = if ($State.sharedHome) { [string]$State.sharedHome } else { $script:SharedHome }
+    $authDeployed = $false
+
     try {
-        if ([string]::IsNullOrWhiteSpace($Message)) {
+        foreach ($environmentVariable in $script:AuthEnvironmentVariables) {
+            $previousEnvironment[$environmentVariable] = [Environment]::GetEnvironmentVariable($environmentVariable, 'Process')
+            [Environment]::SetEnvironmentVariable($environmentVariable, $null, 'Process')
+        }
+
+        if ($shareConvo) {
+            $profileAuthFile = Join-Path (Join-Path $script:ProfilesRoot $AccountProfile.id) 'auth.json'
+            if (-not (Test-Path -LiteralPath $profileAuthFile)) {
+                throw "The selected profile '$($AccountProfile.label)' has no saved sign-in. Add or sign in to this account in Codex Account Switcher first."
+            }
+            Deploy-ProfileAuth -ProfileId $AccountProfile.id -SharedHome $sharedHome
+            $authDeployed = $true
+            [Environment]::SetEnvironmentVariable('CODEX_HOME', $sharedHome, 'Process')
+        }
+        else {
+            [Environment]::SetEnvironmentVariable('CODEX_HOME', $AccountProfile.home, 'Process')
+        }
+
+        if ($Resume) {
+            & $codexPath --no-daemon resume
+        }
+        elseif ([string]::IsNullOrWhiteSpace($Message)) {
             & $codexPath --no-daemon
         }
         else {
@@ -455,8 +832,16 @@ function Start-Profile {
         }
     }
     finally {
+        if ($shareConvo -and $authDeployed) {
+            Sync-ProfileAuth -ProfileId $AccountProfile.id -SharedHome $sharedHome
+        }
+        elseif (-not $shareConvo) {
+            Sync-ProfileAuth -ProfileId $AccountProfile.id -SourceHome ([string]$AccountProfile.home)
+        }
         foreach ($environmentVariable in $script:AuthEnvironmentVariables) {
-            [Environment]::SetEnvironmentVariable($environmentVariable, $previousEnvironment[$environmentVariable], 'Process')
+            if ($previousEnvironment.ContainsKey($environmentVariable)) {
+                [Environment]::SetEnvironmentVariable($environmentVariable, $previousEnvironment[$environmentVariable], 'Process')
+            }
         }
     }
 }
@@ -525,6 +910,12 @@ function Add-Account {
         return
     }
 
+    $shareConvo = ($null -eq $State.shareConversations) -or ($State.shareConversations -eq $true)
+    if ($shareConvo) {
+        $sharedHome = if ($State.sharedHome) { [string]$State.sharedHome } else { $script:SharedHome }
+        Import-ProfileConversations -Profile $profile -SharedHome $sharedHome
+    }
+
     $State.profiles = @($State.profiles) + @($profile)
     Set-ActiveProfile -State $State -AccountProfile $profile -Quiet
     Write-Host "Added '$label'. Its sign-in is saved on this device." -ForegroundColor Green
@@ -556,8 +947,18 @@ function Install-CodexProxy {
     }
     [System.IO.File]::WriteAllText($script:RealCodexPathFile, $realCodexPath, [System.Text.UTF8Encoding]::new($false))
 
+    $baseDir = $PSScriptRoot
+    if ([string]::IsNullOrWhiteSpace($baseDir) -or -not (Test-Path -LiteralPath $baseDir)) {
+        if ($MyInvocation.MyCommand.Path -and (Test-Path -LiteralPath $MyInvocation.MyCommand.Path)) {
+            $baseDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+        }
+        else {
+            $baseDir = (Get-Location).Path
+        }
+    }
+
     foreach ($fileName in @('CodexProxy.ps1', 'codex.cmd')) {
-        $sourcePath = Join-Path $PSScriptRoot $fileName
+        $sourcePath = Join-Path $baseDir $fileName
         if (-not (Test-Path -LiteralPath $sourcePath)) {
             throw "The launcher support file '$fileName' is missing. Keep it beside CodexSwitcher.ps1."
         }
@@ -586,14 +987,29 @@ function Set-ActiveProfile {
     param(
         [Parameter(Mandatory = $true)]$State,
         [Parameter(Mandatory = $true)]$AccountProfile,
-        [switch]$Quiet
+        [switch]$Quiet,
+        [switch]$SkipPreviousAuthSync
     )
 
-    # Persist the selection and install a shim so future codex invocations resolve it.
+    $shareConvo = ($null -eq $State.shareConversations) -or ($State.shareConversations -eq $true)
+    $sharedHome = if ($State.sharedHome) { [string]$State.sharedHome } else { $script:SharedHome }
+
+    if ($shareConvo) {
+        if (-not $SkipPreviousAuthSync -and -not [string]::IsNullOrWhiteSpace([string]$State.selectedProfileId)) {
+            Sync-ProfileAuth -ProfileId $State.selectedProfileId -SharedHome $sharedHome
+        }
+        Deploy-ProfileAuth -ProfileId $AccountProfile.id -SharedHome $sharedHome
+
+        [Environment]::SetEnvironmentVariable('CODEX_HOME', $sharedHome, 'User')
+        [Environment]::SetEnvironmentVariable('CODEX_HOME', $sharedHome, 'Process')
+    }
+    else {
+        [Environment]::SetEnvironmentVariable('CODEX_HOME', [string]$AccountProfile.home, 'User')
+        [Environment]::SetEnvironmentVariable('CODEX_HOME', [string]$AccountProfile.home, 'Process')
+    }
+
     $State.selectedProfileId = $AccountProfile.id
     Save-State -State $State
-    [Environment]::SetEnvironmentVariable('CODEX_HOME', [string]$AccountProfile.home, 'User')
-    [Environment]::SetEnvironmentVariable('CODEX_HOME', [string]$AccountProfile.home, 'Process')
     $restartTerminal = Install-CodexProxy
 
     if (-not $Quiet) {
@@ -611,15 +1027,70 @@ function Set-ActiveProfile {
     }
 }
 
+function Set-ConversationMode {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][bool]$Shared
+    )
+
+    $currentlyShared = ($null -eq $State.shareConversations) -or ($State.shareConversations -eq $true)
+    if ($currentlyShared -eq $Shared) {
+        $script:MenuNotification = 'Conversation sharing preference is already set.'
+        return
+    }
+
+    $selectedProfile = Get-SelectedProfile -State $State
+    $sharedHome = if ($State.sharedHome) { [string]$State.sharedHome } else { $script:SharedHome }
+    if ($currentlyShared -and -not $Shared -and $null -ne $selectedProfile) {
+        # Save the selected account's latest refreshed token before leaving the shared home.
+        Sync-ProfileAuth -ProfileId $selectedProfile.id -SharedHome $sharedHome
+        $profileAuth = Join-Path (Join-Path $script:ProfilesRoot $selectedProfile.id) 'auth.json'
+        $isolatedAuth = Join-Path ([string]$selectedProfile.home) 'auth.json'
+        if (Test-Path -LiteralPath $profileAuth) {
+            try {
+                $profileAuthFullPath = [System.IO.Path]::GetFullPath($profileAuth)
+                $isolatedAuthFullPath = [System.IO.Path]::GetFullPath($isolatedAuth)
+                if (-not [string]::Equals($profileAuthFullPath, $isolatedAuthFullPath, [StringComparison]::OrdinalIgnoreCase)) {
+                    $isolatedHome = [System.IO.Path]::GetDirectoryName($isolatedAuthFullPath)
+                    if (-not (Test-Path -LiteralPath $isolatedHome)) {
+                        New-Item -ItemType Directory -Path $isolatedHome -Force | Out-Null
+                    }
+                    [System.IO.File]::Copy($profileAuth, $isolatedAuth, $true)
+                }
+            }
+            catch {
+                Write-Warning "Could not prepare '$($selectedProfile.label)' for isolated mode. Details: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    $State.shareConversations = $Shared
+    Save-State -State $State
+
+    if ($null -ne $selectedProfile) {
+        Set-ActiveProfile -State $State -AccountProfile $selectedProfile -Quiet -SkipPreviousAuthSync:$Shared
+    }
+
+    if ($Shared) {
+        foreach ($profile in @($State.profiles)) {
+            Import-ProfileConversations -Profile $profile -SharedHome $sharedHome
+        }
+    }
+    $script:MenuNotification = 'Conversation sharing preference saved.'
+}
+
 function Show-Help {
     Write-Host 'Commands:' -ForegroundColor Cyan
     Write-Host '  /help                                  Show this help'
     Write-Host '  /accounts                              Refresh and list accounts'
     Write-Host '  /switch <number>                       Select the active account'
     Write-Host '  /open                                  Open Codex with an empty composer'
+    Write-Host '  /resume                                Show conversations and resume one'
     Write-Host '  /add-account                           Sign in to another ChatGPT account'
     Write-Host '  /refresh-usage                         Refresh every account limit'
     Write-Host '  /rename-account <number> <new label>   Rename an account'
+
+    Write-Host '  /shared-convo [on|off]                 Turn conversation sharing on or off'
     Write-Host '  /quit                                  Exit the switcher'
     Write-Host ''
     Write-Host 'Type a regular message to open Codex with that message for the selected account.' -ForegroundColor DarkGray
@@ -632,7 +1103,7 @@ function Read-MenuInput {
     Write-Host '>: ' -NoNewline
     $origin = $Host.UI.RawUI.CursorPosition
     Write-Host $Placeholder -NoNewline -ForegroundColor DarkGray
-    [Console]::SetCursorPosition($origin.X, $origin.Y)
+    [Console]::SetCursorPosition($origin.X + $Placeholder.Length, $origin.Y)
 
     $characters = New-Object 'System.Collections.Generic.List[char]'
     $cursor = 0
@@ -742,9 +1213,36 @@ function Show-MainMenu {
         }
 
         Clear-Host
-        Write-Host '+--------------------------------------------------------------------------+' -ForegroundColor White
-        Write-Host '| Codex Account Switcher                                                   |' -ForegroundColor Cyan
-        Write-Host '+--------------------------------------------------------------------------+' -ForegroundColor White
+        $banner = @(
+            ' ██████  ██████  ██████  ███████ ██   ██     ███████ ██     ██ ██ ████████  ██████ ██   ██ ███████ ██████'
+            '██      ██    ██ ██   ██ ██       ██ ██      ██      ██     ██ ██    ██    ██      ██   ██ ██      ██   ██'
+            '██      ██    ██ ██   ██ █████     ███       ███████ ██  █  ██ ██    ██    ██      ███████ █████   ██████'
+            '██      ██    ██ ██   ██ ██       ██ ██           ██ ██ ███ ██ ██    ██    ██      ██   ██ ██      ██   ██'
+            ' ██████  ██████  ██████  ███████ ██   ██     ███████  ███ ███  ██    ██     ██████ ██   ██ ███████ ██   ██'
+        )
+        $terminalWidth = 80
+        try {
+            $terminalWidth = [int]$Host.UI.RawUI.WindowSize.Width
+        }
+        catch { }
+        if ($terminalWidth -lt 3) { $terminalWidth = 80 }
+
+        $bannerWidth = 0
+        foreach ($line in $banner) {
+            $bannerWidth = [Math]::Max($bannerWidth, $line.Length)
+        }
+        $bannerLeftPadding = [int][Math]::Max(0, [Math]::Floor(($terminalWidth - $bannerWidth) / 2))
+        $divider = '+' + ('-' * ($terminalWidth - 2)) + '+'
+        Write-Host $divider -ForegroundColor White
+        foreach ($line in $banner) {
+            Write-Host ((' ' * $bannerLeftPadding) + $line.PadRight($bannerWidth)) -ForegroundColor Cyan
+        }
+        Write-Host $divider -ForegroundColor White
+        if (-not [string]::IsNullOrWhiteSpace($script:MenuNotification)) {
+            Write-Host "  $script:MenuNotification" -ForegroundColor Cyan
+            $script:MenuNotification = $null
+        }
+        Write-Host ''
 
         if ($snapshots.Count -eq 0) {
             Write-Host 'No accounts yet. Use /add-account to sign in.' -ForegroundColor DarkYellow
@@ -759,8 +1257,8 @@ function Show-MainMenu {
             }
         }
 
-        Write-Host '+--------------------------------------------------------------------------+' -ForegroundColor White
-        $choice = (Read-MenuInput -Placeholder 'number to switch, message to start Codex, /help for commands').Trim()
+        Write-Host $divider -ForegroundColor White
+        $choice = (Read-MenuInput -Placeholder 'number to switch, /add-account, /resume, /help, or type a message').Trim()
 
         if ([string]::IsNullOrWhiteSpace($choice)) { continue }
         if ($choice -match '(?i)^/(quit|exit)$') { return }
@@ -776,6 +1274,26 @@ function Show-MainMenu {
             Add-Account -State $state
             $state = Get-State
             $refreshNeeded = $true
+            continue
+        }
+        if ($choice -match '(?i)^/(shared-convo|convo-mode|share-convo)(\s+(.+))?$') {
+            $arg = if ($Matches[3]) { $Matches[3].Trim().ToLowerInvariant() } else { '' }
+            if ($arg -in @('on', 'enable', 'true', '1')) {
+                Set-ConversationMode -State $state -Shared $true
+            }
+            elseif ($arg -in @('off', 'disable', 'false', '0')) {
+                Set-ConversationMode -State $state -Shared $false
+            }
+            elseif ($arg -eq '' -or $arg -eq 'toggle') {
+                $currentlyShared = ($null -eq $state.shareConversations) -or ($state.shareConversations -eq $true)
+                Set-ConversationMode -State $state -Shared (-not $currentlyShared)
+            }
+            elseif ($arg -eq 'status') {
+                $script:MenuNotification = "Use '/shared-convo on' or '/shared-convo off' to set conversation sharing."
+            }
+            else {
+                $script:MenuNotification = "Unrecognized option '$arg'. Use '/shared-convo on', '/shared-convo off', or '/shared-convo' to toggle."
+            }
             continue
         }
         if ($choice -match '(?i)^/switch\s+(\d+)\s*$') {
@@ -811,7 +1329,18 @@ function Show-MainMenu {
                 Start-Sleep -Seconds 1
                 continue
             }
-            Start-Profile -AccountProfile $selectedProfile
+            Start-Profile -State $state -AccountProfile $selectedProfile
+            $refreshNeeded = $true
+            continue
+        }
+        if ($choice -match '(?i)^/resume$') {
+            $selectedProfile = Get-SelectedProfile -State $state
+            if ($null -eq $selectedProfile) {
+                Write-Warning 'Add an account first with /add-account.'
+                Start-Sleep -Seconds 1
+                continue
+            }
+            Start-Profile -State $state -AccountProfile $selectedProfile -Resume
             $refreshNeeded = $true
             continue
         }
@@ -827,7 +1356,7 @@ function Show-MainMenu {
             Start-Sleep -Seconds 1
             continue
         }
-        Start-Profile -AccountProfile $selectedProfile -Message $choice
+        Start-Profile -State $state -AccountProfile $selectedProfile -Message $choice
         $refreshNeeded = $true
     }
 }
