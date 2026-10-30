@@ -1,7 +1,18 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-$dataRoot = Join-Path $env:LOCALAPPDATA 'CodexAccountSwitcher'
+$isWindows = ($env:OS -eq 'Windows_NT')
+$homeRoot = if ($isWindows) { $env:USERPROFILE } else { $HOME }
+if ($isWindows) {
+    $dataRoot = Join-Path $env:LOCALAPPDATA 'CodexAccountSwitcher'
+}
+elseif ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)) {
+    $dataRoot = Join-Path $homeRoot 'Library/Application Support/CodexAccountSwitcher'
+}
+else {
+    $dataHome = if (-not [string]::IsNullOrWhiteSpace($env:XDG_DATA_HOME)) { $env:XDG_DATA_HOME } else { Join-Path $homeRoot '.local/share' }
+    $dataRoot = Join-Path $dataHome 'CodexAccountSwitcher'
+}
 $profilesRoot = Join-Path $dataRoot 'profiles'
 $statePath = Join-Path $dataRoot 'profiles.json'
 $realCodexPathFile = Join-Path $dataRoot 'codex-path.txt'
@@ -23,7 +34,7 @@ try {
     }
 
     $shareConvo = ($null -eq $state.shareConversations) -or ($state.shareConversations -eq $true)
-    $sharedHome = if ($state.sharedHome) { [string]$state.sharedHome } else { Join-Path $env:USERPROFILE '.codex' }
+    $sharedHome = if ($state.sharedHome) { [string]$state.sharedHome } else { Join-Path $homeRoot '.codex' }
     $profileId = [string]$selectedProfile[0].id
     $profileDir = Join-Path $profilesRoot $profileId
     $profileAuthFile = Join-Path $profileDir 'auth.json'

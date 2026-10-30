@@ -1,24 +1,30 @@
 # Codex Account Switcher
 
-A portable PowerShell launcher for switching between saved Codex CLI ChatGPT accounts. The launcher folder can be moved or shared; account credentials stay in the current Windows user's local profile.
+A portable PowerShell launcher for switching between saved Codex CLI ChatGPT accounts on Windows and macOS. The launcher folder can be moved or shared; account credentials stay in the current user's local profile.
 
 ## Requirements
 
-- Windows PowerShell 5.1 or PowerShell 7
+- Windows PowerShell 5.1 or PowerShell 7 on Windows; PowerShell 7 (`pwsh`) on macOS
 - Codex CLI installed and available as `codex` on `PATH`
 - ChatGPT sign-in for Codex CLI accounts whose usage limits you want to display
 
 ## Start it
 
-Double-click `Run-CodexSwitcher.cmd` to open the menu in a PowerShell window, or open PowerShell in this folder and run:
+On Windows, double-click `Run-CodexSwitcher.cmd` or run this from PowerShell:
 
 ```powershell
 .\CodexSwitcher.ps1
 ```
 
-On first run, the current default Codex profile (`%USERPROFILE%\.codex`) is added as **Personal** and selected. Use `/add-account` to create another profile; each added account requires a one-time browser sign-in. Enter an account number or use `/switch <number>` to switch. The launcher installs a small `codex` command shim in your Windows user profile; it reads the selected account each time you run `codex`. Restart terminal applications once after the first switch so they pick up the shim's PATH entry.
+On macOS, install PowerShell 7 using [Microsoft's installation instructions](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-macos), open Terminal in this folder, and run:
 
-The menu shows each account's returned rate-limit windows as usage bars, including used percentage, remaining percentage, and reset time. A window is labeled weekly or daily only when Codex reports that duration. Some accounts may return different windows or no data; those are shown as reported.
+```powershell
+pwsh -NoProfile -File ./CodexSwitcher.ps1
+```
+
+The first profile is your existing Codex home (`%USERPROFILE%\.codex` on Windows or `~/.codex` on macOS), shown as **Personal**. Use `/add-account` to create another profile; each added account requires a one-time browser sign-in. On first switch, the launcher installs a `codex` command shim in the user's data folder and adds it to the user's PATH. On macOS, it adds the shim path to `~/.zprofile` (zsh), `~/.bash_profile` (bash), or a Fish config file. Restart terminal applications once so they pick up the shim's PATH entry.
+
+The menu shows each account's returned rate-limit windows as usage bars, including used percentage, remaining percentage, and reset time. A window is labeled monthly, weekly, or daily only when Codex reports that duration. Some accounts may return different windows or no data; those are shown as reported.
 
 The switcher uses a Codex CLI-style message prompt. Enter an account number to switch without opening Codex. Type a regular message to open Codex with that message for the selected account. Available commands:
 
@@ -58,13 +64,14 @@ Turning sharing off makes each account use its own Codex home again. Shared conv
 The switcher keeps its account list and profile credentials under:
 
 ```text
-%LOCALAPPDATA%\CodexAccountSwitcher\
+Windows: %LOCALAPPDATA%\CodexAccountSwitcher\
+macOS:   ~/Library/Application Support/CodexAccountSwitcher/
 ```
 
-This state is separate from this folder, so moving the launcher on the same computer preserves your accounts. When you copy the launcher to another computer, install Codex CLI there and add/sign in to the accounts on that computer. Do not copy or share the `CodexAccountSwitcher` data folder: Codex auth files contain credentials and should be treated like passwords.
+This state is separate from the launcher folder, so moving the launcher on the same computer preserves your accounts. When moving from Windows to Mac, install Codex CLI and PowerShell 7 on the Mac, run the switcher, then use `/add-account` to sign in to each account. Account state is stored separately per operating system, and the switcher does not import Windows sign-ins or conversation history. Do not copy or share the `CodexAccountSwitcher` data folder: Codex auth files contain credentials and should be treated like passwords.
 
 ## Usage data and compatibility
 
-Usage comes from the local Codex App Server's `account/rateLimits/read` request. The App Server interface is experimental and can change between Codex CLI releases. If usage cannot be read, the switcher still lets you open that profile and labels its usage as unavailable. CLI launches use `--no-daemon` to avoid the Windows socket path-length error with separate account homes. The launcher does not estimate a limit or store credentials in this folder.
+Usage comes from the local Codex App Server's `account/rateLimits/read` request. The App Server interface is experimental and can change between Codex CLI releases. If usage cannot be read, the switcher still lets you open that profile and labels its usage as unavailable. CLI launches use `--no-daemon` with separate account homes. The launcher does not estimate a limit or store credentials in the launcher folder.
 
-Per-profile sign-ins are stored under the switcher's local app-data directory. In shared conversation mode, the conversation store is `%LOCALAPPDATA%\CodexAccountSwitcher\shared`; in isolated mode, each account uses its own Codex home, including `%USERPROFILE%\.codex` for the Personal profile. The shared home also contains a copy of the active profile's auth file, so do not share the switcher's data folder with another person or PC.
+Per-profile sign-ins are stored under the switcher's user data directory. In shared conversation mode, the conversation store is the `shared` subfolder there; in isolated mode, each account uses its own Codex home, including `~/.codex` for the Personal profile on macOS. The shared home also contains a copy of the active profile's auth file, so do not share the switcher's data folder with another person or PC.

@@ -2,13 +2,25 @@
 
 $ErrorActionPreference = 'Stop'
 
-$script:DataRoot = Join-Path $env:LOCALAPPDATA 'CodexAccountSwitcher'
+$script:IsWindows = ($env:OS -eq 'Windows_NT')
+$script:PathComparison = if ($script:IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+$script:HomeRoot = if ($script:IsWindows) { $env:USERPROFILE } else { $HOME }
+if ($script:IsWindows) {
+    $script:DataRoot = Join-Path $env:LOCALAPPDATA 'CodexAccountSwitcher'
+}
+elseif ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)) {
+    $script:DataRoot = Join-Path $script:HomeRoot 'Library/Application Support/CodexAccountSwitcher'
+}
+else {
+    $dataHome = if (-not [string]::IsNullOrWhiteSpace($env:XDG_DATA_HOME)) { $env:XDG_DATA_HOME } else { Join-Path $script:HomeRoot '.local/share' }
+    $script:DataRoot = Join-Path $dataHome 'CodexAccountSwitcher'
+}
 $script:ProfilesRoot = Join-Path $script:DataRoot 'profiles'
 $script:StatePath = Join-Path $script:DataRoot 'profiles.json'
 $script:ProxyRoot = Join-Path $script:DataRoot 'bin'
 $script:RealCodexPathFile = Join-Path $script:DataRoot 'codex-path.txt'
-$script:DefaultCodexHome = Join-Path $env:USERPROFILE '.codex'
-if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME) -and -not $env:CODEX_HOME.StartsWith($script:ProfilesRoot, [StringComparison]::OrdinalIgnoreCase)) {
+$script:DefaultCodexHome = Join-Path $script:HomeRoot '.codex'
+if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME) -and -not $env:CODEX_HOME.StartsWith($script:ProfilesRoot, $script:PathComparison)) {
     $script:DefaultCodexHome = $env:CODEX_HOME
 }
 $script:SharedHome = Join-Path $script:DataRoot 'shared'
@@ -23,6 +35,8 @@ $script:AuthEnvironmentVariables = @(
 $script:CodexApplication = Get-Command codex -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 
 function Broadcast-EnvironmentChange {
+    if (-not $script:IsWindows) { return }
+
     if (-not ('CodexSwitcherEnvironmentBroadcast' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
@@ -38,6 +52,22 @@ public static class CodexSwitcherEnvironmentBroadcast {
     [void][CodexSwitcherEnvironmentBroadcast]::SendMessageTimeout([IntPtr](-1), [uint32]0x1A, [UIntPtr]::Zero, 'Environment', [uint32]2, [uint32]1000, [ref]$result)
 }
 
+function Get-NormalizedFullPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+    }
+    catch {
+        return $Path.TrimEnd([char[]]@('\', '/'))
+    }
+    $rootPath = [System.IO.Path]::GetPathRoot($fullPath)
+    if ($fullPath.Length -gt $rootPath.Length) {
+        $fullPath = $fullPath.TrimEnd([char[]]@('\', '/'))
+    }
+    return $fullPath
+}
+
 function Get-CodexPath {
     if (Test-Path -LiteralPath $script:RealCodexPathFile) {
         $savedPath = (Get-Content -LiteralPath $script:RealCodexPathFile -Raw).Trim()
@@ -47,12 +77,12 @@ function Get-CodexPath {
     }
 
     $codexApplications = @(Get-Command codex -CommandType Application -All -ErrorAction SilentlyContinue |
-        Where-Object { $_.Source -and -not $_.Source.StartsWith($script:ProxyRoot, [StringComparison]::OrdinalIgnoreCase) })
+        Where-Object { $_.Source -and -not $_.Source.StartsWith($script:ProxyRoot, $script:PathComparison) })
     if ($codexApplications.Count -gt 0) {
         $script:CodexApplication = $codexApplications[0]
     }
 
-    if ($null -eq $script:CodexApplication -or $script:CodexApplication.Source.StartsWith($script:ProxyRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    if ($null -eq $script:CodexApplication -or $script:CodexApplication.Source.StartsWith($script:ProxyRoot, $script:PathComparison)) {
         throw 'Codex CLI was not found on PATH. Install Codex CLI, open a new PowerShell window, and try again.'
     }
 
@@ -146,13 +176,13 @@ function Import-ProfileConversations {
         return
     }
     try {
-        $sourceFullPath = [System.IO.Path]::GetFullPath($sourceHome).TrimEnd('\')
-        $sharedFullPath = [System.IO.Path]::GetFullPath($SharedHome).TrimEnd('\')
+        $sourceFullPath = Get-NormalizedFullPath -Path $sourceHome
+        $sharedFullPath = Get-NormalizedFullPath -Path $SharedHome
     }
     catch {
         return
     }
-    if ([string]::Equals($sourceFullPath, $sharedFullPath, [StringComparison]::OrdinalIgnoreCase)) {
+    if ([string]::Equals($sourceFullPath, $sharedFullPath, $script:PathComparison)) {
         return
     }
     if (-not (Test-Path -LiteralPath $SharedHome)) {
@@ -168,7 +198,7 @@ function Import-ProfileConversations {
         }
         $rolloutFiles = Get-ChildItem -LiteralPath $srcSessions -Recurse -Filter '*.jsonl' -File -ErrorAction SilentlyContinue
         foreach ($file in $rolloutFiles) {
-            $relPath = $file.FullName.Substring($srcSessions.Length).TrimStart('\')
+            $relPath = $file.FullName.Substring($srcSessions.Length).TrimStart([char[]]@('\', '/'))
             $targetPath = Join-Path $dstSessions $relPath
             if (-not (Test-Path -LiteralPath $targetPath)) {
                 $targetDir = [System.IO.Path]::GetDirectoryName($targetPath)
@@ -396,9 +426,9 @@ function Get-State {
     foreach ($accountProfile in @($state.profiles)) {
         if ([string]::IsNullOrWhiteSpace([string]$accountProfile.home)) { continue }
         try {
-            $profileHomeFull = [System.IO.Path]::GetFullPath([string]$accountProfile.home).TrimEnd('\')
-            $sharedHomeFull = [System.IO.Path]::GetFullPath($legacySharedHome).TrimEnd('\')
-            if ([string]::Equals($profileHomeFull, $sharedHomeFull, [StringComparison]::OrdinalIgnoreCase)) {
+            $profileHomeFull = Get-NormalizedFullPath -Path ([string]$accountProfile.home)
+            $sharedHomeFull = Get-NormalizedFullPath -Path $legacySharedHome
+            if ([string]::Equals($profileHomeFull, $sharedHomeFull, $script:PathComparison)) {
                 $sharedHomeMatchesProfile = $true
                 break
             }
@@ -656,6 +686,7 @@ function Get-ProfileSnapshot {
 function Get-WindowLabel {
     param([int]$DurationMinutes)
 
+    if ($DurationMinutes -eq 43200) { return 'monthly limit' }
     if ($DurationMinutes -eq 10080) { return 'weekly limit' }
     if ($DurationMinutes -eq 1440) { return 'daily limit' }
     if ($DurationMinutes -gt 0 -and ($DurationMinutes % 60) -eq 0) {
@@ -942,7 +973,7 @@ function Install-CodexProxy {
     }
 
     $realCodexPath = Get-CodexPath
-    if ($realCodexPath.StartsWith($script:ProxyRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    if ($realCodexPath.StartsWith($script:ProxyRoot, $script:PathComparison)) {
         throw 'The Codex command shim cannot find the original Codex CLI executable.'
     }
     [System.IO.File]::WriteAllText($script:RealCodexPathFile, $realCodexPath, [System.Text.UTF8Encoding]::new($false))
@@ -957,30 +988,77 @@ function Install-CodexProxy {
         }
     }
 
-    foreach ($fileName in @('CodexProxy.ps1', 'codex.cmd')) {
+    $supportFiles = if ($script:IsWindows) { @('CodexProxy.ps1', 'codex.cmd') } else { @('CodexProxy.ps1') }
+    foreach ($fileName in $supportFiles) {
         $sourcePath = Join-Path $baseDir $fileName
         if (-not (Test-Path -LiteralPath $sourcePath)) {
             throw "The launcher support file '$fileName' is missing. Keep it beside CodexSwitcher.ps1."
         }
         Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $script:ProxyRoot $fileName) -Force
     }
-    Copy-Item -LiteralPath (Join-Path $script:ProxyRoot 'CodexProxy.ps1') -Destination (Join-Path $script:ProxyRoot 'codex.ps1') -Force
 
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $pathEntries = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $proxyAlreadyOnUserPath = @($pathEntries | Where-Object { [string]::Equals($_.TrimEnd('\'), $script:ProxyRoot.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
-    if (-not $proxyAlreadyOnUserPath) {
-        $newUserPath = $script:ProxyRoot
-        if (-not [string]::IsNullOrWhiteSpace($userPath)) { $newUserPath += ";$userPath" }
-        [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+    $pathSeparator = [string][System.IO.Path]::PathSeparator
+    $processPathEntries = @($env:Path -split [regex]::Escape($pathSeparator) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $proxyAlreadyOnProcessPath = @($processPathEntries | Where-Object {
+        [string]::Equals((Get-NormalizedFullPath -Path $_), (Get-NormalizedFullPath -Path $script:ProxyRoot), $script:PathComparison)
+    }).Count -gt 0
+
+    if ($script:IsWindows) {
+        Copy-Item -LiteralPath (Join-Path $script:ProxyRoot 'CodexProxy.ps1') -Destination (Join-Path $script:ProxyRoot 'codex.ps1') -Force
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $pathEntries = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $proxyAlreadyOnUserPath = @($pathEntries | Where-Object {
+            [string]::Equals((Get-NormalizedFullPath -Path $_), (Get-NormalizedFullPath -Path $script:ProxyRoot), $script:PathComparison)
+        }).Count -gt 0
+        if (-not $proxyAlreadyOnUserPath) {
+            $newUserPath = $script:ProxyRoot
+            if (-not [string]::IsNullOrWhiteSpace($userPath)) { $newUserPath += ";$userPath" }
+            [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+        }
+        if (-not $proxyAlreadyOnProcessPath) { $env:Path = "$($script:ProxyRoot);$env:Path" }
+        Broadcast-EnvironmentChange
+        return (-not $proxyAlreadyOnUserPath -or -not $proxyAlreadyOnProcessPath)
     }
 
-    $processPathEntries = @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $proxyAlreadyOnProcessPath = @($processPathEntries | Where-Object { [string]::Equals($_.TrimEnd('\'), $script:ProxyRoot.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
-    if (-not $proxyAlreadyOnProcessPath) { $env:Path = "$($script:ProxyRoot);$env:Path" }
-    Broadcast-EnvironmentChange
+    $proxyScriptPath = Join-Path $script:ProxyRoot 'CodexProxy.ps1'
+    $shellQuotedProxyScriptPath = $proxyScriptPath.Replace("'", "'\''")
+    $shimPath = Join-Path $script:ProxyRoot 'codex'
+    $shimContents = "#!/bin/sh`nexec pwsh -NoLogo -NoProfile -File '$shellQuotedProxyScriptPath' `"`$@`"`n"
+    [System.IO.File]::WriteAllText($shimPath, $shimContents, [System.Text.UTF8Encoding]::new($false))
+    $chmod = Get-Command chmod -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $chmod) { throw 'The chmod utility is required to install the macOS Codex command shim.' }
+    & $chmod.Source '+x' $shimPath
+    if ($LASTEXITCODE -ne 0) { throw 'Could not mark the macOS Codex command shim as executable.' }
 
-    return (-not $proxyAlreadyOnUserPath -or -not $proxyAlreadyOnProcessPath)
+    if (-not $proxyAlreadyOnProcessPath) { $env:Path = "$($script:ProxyRoot)$pathSeparator$env:Path" }
+    $shellName = [System.IO.Path]::GetFileNameWithoutExtension([string]$env:SHELL)
+    if ($shellName -eq 'bash') {
+        $shellProfilePath = Join-Path $script:HomeRoot '.bash_profile'
+        $shellQuotedProxyRoot = $script:ProxyRoot.Replace("'", "'\''")
+        $pathLine = "export PATH='$shellQuotedProxyRoot':`$PATH"
+    }
+    elseif ($shellName -eq 'fish') {
+        $fishConfigRoot = Join-Path $script:HomeRoot '.config/fish/conf.d'
+        if (-not (Test-Path -LiteralPath $fishConfigRoot)) {
+            New-Item -ItemType Directory -Path $fishConfigRoot -Force | Out-Null
+        }
+        $shellProfilePath = Join-Path $fishConfigRoot 'codex-account-switcher.fish'
+        $fishQuotedProxyRoot = $script:ProxyRoot.Replace('\', '\\').Replace("'", "\'")
+        $pathLine = "set -gx PATH '$fishQuotedProxyRoot' `$PATH"
+    }
+    else {
+        $shellProfilePath = Join-Path $script:HomeRoot '.zprofile'
+        $shellQuotedProxyRoot = $script:ProxyRoot.Replace("'", "'\''")
+        $pathLine = "export PATH='$shellQuotedProxyRoot':`$PATH"
+    }
+    $shellProfileContent = if (Test-Path -LiteralPath $shellProfilePath) { [System.IO.File]::ReadAllText($shellProfilePath) } else { '' }
+    $proxyAlreadyOnShellPath = $shellProfileContent.Contains('# Added by Codex Account Switcher') -or $shellProfileContent.Contains($script:ProxyRoot)
+    if (-not $proxyAlreadyOnShellPath) {
+        $addition = "`n# Added by Codex Account Switcher`n$pathLine`n"
+        [System.IO.File]::AppendAllText($shellProfilePath, $addition, [System.Text.UTF8Encoding]::new($false))
+    }
+
+    return (-not $proxyAlreadyOnShellPath -or -not $proxyAlreadyOnProcessPath)
 }
 
 function Set-ActiveProfile {
@@ -1000,11 +1078,11 @@ function Set-ActiveProfile {
         }
         Deploy-ProfileAuth -ProfileId $AccountProfile.id -SharedHome $sharedHome
 
-        [Environment]::SetEnvironmentVariable('CODEX_HOME', $sharedHome, 'User')
+        if ($script:IsWindows) { [Environment]::SetEnvironmentVariable('CODEX_HOME', $sharedHome, 'User') }
         [Environment]::SetEnvironmentVariable('CODEX_HOME', $sharedHome, 'Process')
     }
     else {
-        [Environment]::SetEnvironmentVariable('CODEX_HOME', [string]$AccountProfile.home, 'User')
+        if ($script:IsWindows) { [Environment]::SetEnvironmentVariable('CODEX_HOME', [string]$AccountProfile.home, 'User') }
         [Environment]::SetEnvironmentVariable('CODEX_HOME', [string]$AccountProfile.home, 'Process')
     }
 
